@@ -14,43 +14,53 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// String.prototype.replaceAll = function (search, replacement) {
-//   var target = this;
-//   return target.split(search).join(replacement);
-// };
-// function findInDir(dir, filter) {
-//   const files = fs.readdirSync(dir);
-//   files.forEach((file) => {
-//     const filePath = path.join(dir, file);
-//     if (fs.lstatSync(filePath).isDirectory()) {
-//       findInDir(filePath, filter);
-//     } else if (filter.test(filePath)) {
-//       let myFile = filePath;
-//       if (myFile.indexOf("route_") > -1) {
-//         let file_ = filePath.replace(process.env.PWD + "/routes", "").replace("route_", "").replace(".js", "").replaceAll('\\', '/');
-//         file_ == "/index" ? file_ = "/" : file_;
-//         app.use(file_, require(filePath));
-//         console.log(file_);
-//       }
-//     }
-//   });
-// }
-// console.log('Routes List:')
-// findInDir(process.env.PWD + "/routes", /\.js$/)
 
+/* APPLICATION */
 const hostname = "http://localhost:3000";
 
-app.get("/", connectUser(), getAccessToken(), getAccounts(), (req, res, next) => {
-  let promises = [];
-  res.accounts.map(async el => {
-    promises.push(getTransactions(el, res.accessToken));
-  });
+app.get("/", connectUser(), getAccessToken(), async (req, res, next) => {
+  // Get all Account
+  let accounts = [];
+  let page = 0;
+  let totalPages = 0;
+  do {
+    /***** BUG sur l'api, la variable resp.link.next ne devient pas null alors que la data reste la même *****/
+    let [errResp, resp] = await asyncPromise(getAccounts(res.accessToken, ++page));
+    if(errResp) return sendError(errResp, res);
 
-  Promise.all(promises).then((transaction) => {
-    return res.send(transaction)
-  }).catch(err => {
-    return sendError(err, res);
-  })
+    let lastAccountId = resp.account[resp.account.length -1].acc_number
+    let unique = accounts.find(el => el.acc_number == lastAccountId);
+    if(unique) break;
+
+    accounts = accounts.concat(resp.account);
+    if (resp.link.next != null) totalPages = page;
+  } while (page == totalPages)
+
+  // Get all Transaction by Account
+  let count = -1;
+  while (accounts[++count]) {
+    let transactions = [];
+    page = 0;
+    totalPages = 0;
+
+    do {
+      let [errResp, resp] = await asyncPromise(getTransactions(res.accessToken, accounts[count], ++page));
+      if (errResp) return sendError(errResp, res); 
+      if (resp.messageError) {
+        transactions = resp;
+        break;
+      }
+      transactions = transactions.concat(resp.transactions);
+      if (resp.link.next != null) totalPages = page;
+    } while (page == totalPages)
+
+    let uniqueTransaction = transactions;
+    console.log(uniqueTransaction);
+    if (transactions.length) uniqueTransaction = [...new Map(transactions.map((item) => [item.id, item])).values()];
+    accounts[count].transaction = uniqueTransaction;
+  }
+
+  return res.send(accounts);
 })
 
 function connectUser() {
@@ -105,26 +115,25 @@ function getAccessToken() {
   }
 }
 
-function getAccounts() {
-  return (req, res, next) => {
+function getAccounts(accessToken, numPage = 1) {
+  return new Promise((resolve, reject) => {
     request.get({
-      url: `${hostname}/accounts?page=4`,
+      url: `${hostname}/accounts?page=${numPage}`,
       headers: {
         "Content-Type": "application/json",
-        Authorization: 'Bearer ' + res.accessToken
+        Authorization: 'Bearer ' + accessToken
       },
     }, function (err, httpResponse, body) {
-      if (err) return sendError(err, res);
+      if (err) return reject(err);
       let result = JSON.parse(body)
-      res.accounts = result.account
-      next();
+      return resolve(result);
     })
-  }
+  })
 }
 
-function getTransactions(account, accessToken, numPage) {
+function getTransactions(accessToken, account, numPage = 1) {
   return new Promise((resolve, reject) => {
-    let url = `${hostname}/accounts/${account.acc_number}/transactions?page${numPage}`;
+    let url = `${hostname}/accounts/${account.acc_number}/transactions?page=${numPage}`;
     request.get({
       url,
       headers: {
@@ -132,31 +141,13 @@ function getTransactions(account, accessToken, numPage) {
         Authorization: 'Bearer ' + accessToken
       },
     }, function (err, httpResponse, body) {
-      if(err) return reject(err);
-      if (httpResponse.statusCode == 400) return resolve({account: `${account.acc_number} NOT found !`,});
+      if (err) return reject(err);
+      if (httpResponse.statusCode == 400) return resolve({ messageError: `Account ${account.acc_number} NOT found !`, });
       let myTransactions = JSON.parse(body);
-      const uniqueTransaction = [...new Map(myTransactions.transactions.map((item) => [item.id, item])).values()];
-
-      return resolve({
-        ...account,
-        transactions: uniqueTransaction
-      });
+      return resolve(myTransactions);
     })
   })
 }
-
-
-// function getAllTransaction() {
-//   return new Promise((resolve, reject) => {
-//     let allTransactions = [];
-//     res.accounts.map(async el => {
-//       let [errTransaction, transaction] = await asyncPromise(getTransactions(el.acc_number, res.accessToken));
-//       if (errTransaction) return sendError("Une erreur est survenue", res);
-//       allTransactions.push(transaction);
-//     });
-//   })
-// }
-
 
 // catch 404 and forward to error handler
 app.use(function (req, res, next) {
